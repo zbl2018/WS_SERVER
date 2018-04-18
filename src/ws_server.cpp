@@ -3,17 +3,41 @@
 
 //=============静态变量初始化=================
 int ws_server::clientSocket_fd =0 ;
+int ws_server::loc_id= 1;
+map<int,websocketpp::connection_hdl> ws_server::connect_id;
+vector<int> ws_server::OffLine_id;
 sockaddr_in ws_server::serverAddr = {AF_INET,22222,inet_addr("127.0.0.1")};
 ////////////////////////////////////////////
 
 void ws_server::OnOpen(WebsocketServer *server, websocketpp::connection_hdl hdl)
 {
-    cout << "have client connected" << endl;
+    cout << "have client connected"<< endl;
+    cout <<"ptr:"<<hdl.lock().get()<<"  loc_id"<<loc_id<<endl;   
+    if(loc_id<MAX_WSCON){
+        connect_id.insert(make_pair(loc_id,hdl));//记录连接id
+        loc_id++;
+    }
+    else{
+        //重用连接id（已经断开的id）
+    }
+   
 }
 
 void ws_server::OnClose(WebsocketServer *server, websocketpp::connection_hdl hdl)
 {
     cout << "have client disconnected" << endl;
+    map<int,websocketpp::connection_hdl>::iterator it;
+    it = connect_id.begin();
+    while(it != connect_id.end())
+    {
+        //it->first;
+        if(it->second.lock().get()==hdl.lock().get()){
+            OffLine_id.push_back(it->first);
+            connect_id.erase(it);
+            break;
+        }       
+        else it ++;         
+    }
 }
 
 void ws_server::OnMessage(WebsocketServer *server, websocketpp::connection_hdl hdl, message_ptr msg)
@@ -23,7 +47,7 @@ void ws_server::OnMessage(WebsocketServer *server, websocketpp::connection_hdl h
     string strMsg = msg->get_payload();
     int send_status=-1;
     //connection_ptr con = server->get_con_from_hdl(hdl);
-    byte temp[6];
+    //byte temp[6];
     // deal infomatiom of head 
     //默认小车与服务器的tcp连接 id 为 7
     memcpy(head,intToBytes(7,2),2);
@@ -36,7 +60,7 @@ void ws_server::OnMessage(WebsocketServer *server, websocketpp::connection_hdl h
 
     // memcpy(temp,send_info,6);
     // cout<<"temp:"<<bytesToInt(temp+2,4)<<endl;
-    cout<<"ssss:"<<send_info+6<<endl;
+    //cout<<"ssss:"<<send_info+6<<endl;
     send_status=send(clientSocket_fd, send_info,strMsg.length()+7, MSG_NOSIGNAL);
 
     if(send_status>0){
@@ -48,7 +72,7 @@ void ws_server::OnMessage(WebsocketServer *server, websocketpp::connection_hdl h
     cout << strMsg << endl;
     string strRespon = "receive: ";
     strRespon.append(strMsg);
-    server->send(hdl, strRespon, websocketpp::frame::opcode::text);
+    server->send(hdl.lock(), strRespon, websocketpp::frame::opcode::text);
 }
 
 void ws_server::init_ws_server(){
@@ -68,7 +92,7 @@ void ws_server::init_ws_server(){
     server.set_message_handler(bind(&OnMessage, &server, _1, _2));
 }
 void ws_server::ws_run(int port){
-
+    server.set_reuse_addr(true);
     server.listen(port);
     //Start the server accept loop
     server.start_accept();
@@ -84,7 +108,7 @@ void ws_server::InitTcpClient_ConnectServer(string ip_addr,int tcp_server_port){
 	//链接远程主机
 	reconnect_tcp_server(clientSocket_fd,serverAddr);
     //与tcp_server连接成功，创建接收线程
-    int res = pthread_create(&recv_th_id,NULL,recvInfo_from_TcpServer,NULL);
+    int res = pthread_create(&recv_th_id,NULL,recvInfo_from_TcpServer,&server);
     if(res==0){
         printf("create recv pthread successfully!\n");
     }
@@ -115,25 +139,59 @@ int ws_server::reconnect_tcp_server(int &clientSocket_fd, struct sockaddr_in ser
 	return 1;
 }
 void * ws_server::recvInfo_from_TcpServer(void* args){
-		char recvbuf[1024];
-		unsigned char head[6];
+        WebsocketServer *server = (WebsocketServer*)args;
+		char data_buf[MAX_BUF_LEN];
+		unsigned char head_buf[HEAD_LEN];
 		int ret_len;
+        int data_len;
+        int ws_id;
+        websocketpp::connection_hdl ws_hdl;
 	while(1){
-		ret_len=recv(clientSocket_fd,head,6,MSG_WAITALL);
-		int data_len = bytesToInt(head+2,4);
-		ret_len = recv(clientSocket_fd,recvbuf,data_len ,MSG_WAITALL);
-		printf("length:%d\n",data_len);
-		printf("iDataNum:%s\n",recvbuf);
-		if(ret_len==-1||ret_len==0)
-		{
-			printf("oooo2\n");
-			close(clientSocket_fd);
-			//sleep(5);
-			reconnect_tcp_server(clientSocket_fd,serverAddr);
-			continue;
-		}		
-		//printf("链接断开3\n");
-		//recvbuf[iDataNum] = '\0';
+        memset(data_buf,'\0',MAX_BUF_LEN);
+        memset(head_buf,0,HEAD_LEN);
+       
+		ret_len = recv(clientSocket_fd,head_buf,HEAD_LEN,MSG_WAITALL);
+        //cout<<"hex:"<<hex<<head_buf<<endl;
+        if(ret_len==0||ret_len<0){
+             printf("remote socket closed 1\n");
+             close(clientSocket_fd);
+             reconnect_tcp_server(clientSocket_fd,serverAddr);
+        }
+        else{
+            for(int i=0;i<6;i++){
+                    //cout<<hex<<(short)head_buf[i]<<endl;
+                }
+            data_len = bytesToInt(head_buf+2,4);//后四个字节为报文数据部分长度
+            ws_id=bytesToInt(head_buf,2);
+        }
+        cout<<"length:"<<data_len<<endl;
+        cout<<"ws_id:"<<ws_id<<endl;
+        //2.数据部分长度大于接收缓存的最大上限则主动关闭与client的链接
+        if(data_len>MAX_BUF_LEN)
+        {
+            printf("buffer overflow \n");
+            close(clientSocket_fd);
+            reconnect_tcp_server(clientSocket_fd,serverAddr);
+        }
+        //3.获取数据部分,转发给web端
+        ret_len = recv(clientSocket_fd,data_buf,data_len, MSG_WAITALL);
+        if(ret_len > 0){
+            //转发
+            printf("%d,recv message:\n'%s'\n",clientSocket_fd,data_buf);
+            if(connect_id.count(ws_id))
+            {
+                ws_hdl = connect_id[ws_id];
+            }else{
+                printf("the ws_id:%d isn't in db\n",ws_id);
+                continue;
+            }
+            server->send(ws_hdl, data_buf, websocketpp::frame::opcode::text);
+        }
+        else{
+            printf("remote socket closed 2\n"); //客户端断开链接
+            close(clientSocket_fd);
+            reconnect_tcp_server(clientSocket_fd,serverAddr);
+        }
 	}
 	
 }
@@ -144,37 +202,45 @@ byte* ws_server::intToBytes(int value,int byte_len){
     if(byte_len>4||byte_len<1)
     {
        cout<<"byte_len overflow!"<<endl;
-        return 0;           
+        return 0;
     }
-        byte *des = new byte[byte_len];  
-        des[0] = (byte) (value & 0xff);  // 低位(右边)的8个bit位    
-        if(byte_len==1)
-            return des;  
-        des[1] = (byte) ((value >> 8) & 0xff); //第二个8 bit位 
-        if(byte_len==2)
-            return des;   
-        des[2] = (byte) ((value >> 16) & 0xff); //第三个 8 bit位
-        if(byte_len==3)
-            return des;    
-        /** 
-         * (byte)((value >> 24) & 0xFF); 
-         * value向右移动24位, 然后和0xFF也就是(11111111)进行与运算 
-         * 在内存中生成一个与 value 同类型的值 
-         * 然后把这个值强制转换成byte类型, 再赋值给一个byte类型的变量 des[3] 
-         */  
-        des[3] = (byte) ((value >> 24) & 0xff); //第4个 8 bit位  
+    byte *des = new byte[byte_len]; 
+    // for(int i = 0; i < byte_len; i++)
+    // {
+    //     des[i] = (byte)((value >> ((byte_len - i - 1) * 8)) & 0xFF);
+    // }
+    switch(byte_len){
+            case 4:{ 
+                //四位
+                des[3] = (byte) (value & 0xff);
+                des[2] = (byte) ((value >> 8) & 0xff);
+                des[1] = (byte) ((value >> 16) & 0xff);
+                des[0] = (byte) ((value >> 24) & 0xff); 
+                break;
+            }    
+            case 3:{
+                //三位
+                des[2] = (byte) (value & 0xff);
+                des[1] = (byte) ((value >>8) & 0xff);
+                des[0] = (byte) ((value >>16) & 0xff); 
+                break;
+            }
+        case 2:{
+                //二位
+                des[1] = (byte) (value& 0xff);
+                des[0] = (byte) ((value >>8) & 0xff); 
+                break;   
+        }
+        case 1:{
+                //一位
+                des[0] = (byte) (value & 0xff);
+                break; 
+        }      
+        }  
         return des;  
-    }  
-  
-    /** 
-     * 将上面转成的byte数组转换成int原始值  
-     * @param des 
-     * @param offset 
-     * @return 
-     */  
+}
 int ws_server::bytesToInt(byte* des, int byte_len){
-        if(byte_len>4||byte_len<1)
-        {
+        if(byte_len>4||byte_len<1){
         cout<<"byte_len overflow!"<<endl;
         return 0;           
         }  
@@ -182,23 +248,23 @@ int ws_server::bytesToInt(byte* des, int byte_len){
         switch(byte_len){
             case 4:{ 
                 //四位
-                value = (int)((des[0] & 0xff)  
-                | ((des[1] & 0xff) << 8)  
-                | ((des[2] & 0xff) << 16)  
-                | (des[3] & 0xff) << 24);
+                value = (int)((des[3] & 0xff)  
+                | ((des[2] & 0xff) << 8)  
+                | ((des[1] & 0xff) << 16)  
+                | (des[0] & 0xff) << 24);
                 break;
             }    
             case 3:{
                 //三位
-                value = (int) ((des[0] & 0xff)  
+                value = (int) ((des[2] & 0xff)  
                 | ((des[1] & 0xff) << 8)  
-                | ((des[2] & 0xff) << 16));
+                | ((des[0] & 0xff) << 16));
                 break;
             }
         case 2:{
                 //二位
-                value = (int) ((des[0] & 0xff)  
-                | ((des[1] & 0xff) << 8));
+                value = (int) ((des[1] & 0xff)  
+                | ((des[0] & 0xff) << 8));
                 break;   
         }
         case 1:{

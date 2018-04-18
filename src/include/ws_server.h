@@ -1,7 +1,6 @@
 #include <iostream>
 #include "./websocketpp/config/asio_no_tls.hpp"
 #include "./websocketpp/server.hpp"
-#define byte unsigned char
 typedef websocketpp::server<websocketpp::config::asio> WebsocketServer;
 typedef WebsocketServer::message_ptr message_ptr;
 typedef WebsocketServer::connection_ptr connection_ptr;
@@ -10,6 +9,11 @@ using websocketpp::lib::placeholders::_1;
 using websocketpp::lib::placeholders::_2;
 using websocketpp::lib::bind;
 using namespace std;
+#define byte unsigned char
+//WS同时存在最大的最大连接数
+#define MAX_WSCON 65535
+#define HEAD_LEN 6
+#define MAX_BUF_LEN 1024
 class ws_server{
     public:
             //websocket
@@ -31,6 +35,10 @@ class ws_server{
              WebsocketServer  server;
              static sockaddr_in serverAddr;
              static int clientSocket_fd;
+             //连接id键值对
+             static map<int,websocketpp::connection_hdl>connect_id;
+             static int loc_id;
+             static vector<int>OffLine_id;
              //tcp接收线程的id
              pthread_t recv_th_id;
 };
